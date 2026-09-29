@@ -57,12 +57,25 @@ function isBypassed(request, url) {
   return false;
 }
 
+// Only the app entry (scope root or index.html) may refresh the cached shell.
+function isShellUrl(url) {
+  const scopePath = new URL(self.registration.scope).pathname;
+  return url.pathname === scopePath || url.pathname === `${scopePath}index.html`;
+}
+
+function isHtmlResponse(response) {
+  return !!response && response.ok && (response.headers.get('content-type') || '').includes('text/html');
+}
+
 // Navigation: network first, cached shell as offline fallback.
-async function handleNavigation(request) {
+async function handleNavigation(event) {
+  const { request } = event;
   const cache = await caches.open(CACHE_VERSION);
   try {
     const response = await fetch(request);
-    if (response && response.ok) cache.put(SHELL_URL, response.clone());
+    if (isShellUrl(new URL(request.url)) && isHtmlResponse(response)) {
+      event.waitUntil(cache.put(SHELL_URL, response.clone()));
+    }
     return response;
   } catch (error) {
     const cached = (await cache.match(SHELL_URL)) || (await cache.match(request, { ignoreSearch: true }));
@@ -72,15 +85,17 @@ async function handleNavigation(request) {
 }
 
 // Static same-origin assets: stale-while-revalidate.
-async function handleAsset(request) {
+async function handleAsset(event) {
+  const { request } = event;
   const cache = await caches.open(CACHE_VERSION);
   const cached = await cache.match(request, { ignoreSearch: true });
   const network = fetch(request)
     .then((response) => {
-      if (response && response.ok) cache.put(request, response.clone());
+      if (response && response.ok) return cache.put(request, response.clone()).then(() => response);
       return response;
     })
     .catch(() => undefined);
+  event.waitUntil(network);
   return cached || (await network) || Response.error();
 }
 
@@ -89,8 +104,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (isBypassed(request, url)) return;
   if (request.mode === 'navigate') {
-    event.respondWith(handleNavigation(request));
+    event.respondWith(handleNavigation(event));
     return;
   }
-  event.respondWith(handleAsset(request));
+  event.respondWith(handleAsset(event));
 });
